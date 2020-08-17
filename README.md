@@ -1,4 +1,5 @@
-# cntlm_gss
+# CNTLM_GSS an unnofficial port to CNTLM.
+
 Fast NTLM authentication proxy with tunneling.
 
 Cntlm is an NTLM / NTLMv2 authenticating HTTP/1.1 proxy. It caches auth'd connections for reuse, offers TCP/IP tunneling (port forwarding) thru parent proxy and much much more. It's in C, very fast and resource-efficient. 

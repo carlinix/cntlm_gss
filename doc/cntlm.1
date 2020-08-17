@@ -1,4 +1,4 @@
-.TH CNTLM 1 "Nov 2010" "cntlm 0.90" "Accelerating NTLM/NTLMv2 Authentication Proxy"
+.TH CNTLM 1 "Aug 2020" "cntlm 0.93" "Accelerating NTLM/NTLMv2 Authentication Proxy"
 .SH NAME
 \fBcntlm\fP - authenticating HTTP(S) proxy with TCP/IP tunneling and acceleration
 
@@ -105,9 +105,9 @@ equivalents. NTLMv2 is the most and possibly the only secure authentication of t
 the cache file is in /tmp/krb5cc_<uid>, you can override this using the environment variable KRB5CCNAME.
 In example KRB5CCNAME=FILE:/tmp/my_krb5cc_for_LDS.IT
 If GSS is specified, at each connection sends the auth token without to ask the proxy if auth is needed.
-If GSS credentials are not available will fallback to the NTLM discovery procedure
+If GSS credentials are not available will fallback to the NTLM discovery procedure.
 If no Auth type is specified and there is a GSS cached credential available and the server asks for a 
-'Negotiate' auth, then a GSS token is used, else the NTLM auth is used
+'Negotiate' auth, then a GSS token is used, else the NTLM auth is used.
 
 
 .ne 4

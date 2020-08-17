@@ -1,4 +1,4 @@
-# CNTLM_GSS an unnofficial port to CNTLM.
+# CNTLM_GSS an unofficial port to CNTLM.
 
 Fast NTLM authentication proxy with tunneling.
 

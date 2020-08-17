@@ -60,6 +60,10 @@
 #include "forward.h"				/* code serving via parent proxy */
 #include "direct.h"				/* code serving directly without proxy */
 
+#ifdef ENABLE_KERBEROS
+#include "kerberos.h"
+#endif
+
 #define STACK_SIZE	sizeof(void *)*8*1024
 
 /*
@@ -881,8 +885,16 @@ int main(int argc, char **argv) {
 		fprintf(stderr, "Usage: %s [-AaBcDdFfgHhILlMPpSsTUuvw] <proxy_host>[:]<proxy_port> ...\n", argv[0]);
 		fprintf(stderr, "\t-A  <address>[/<net>]\n"
 				"\t    ACL allow rule. IP or hostname, net must be a number (CIDR notation)\n");
-		fprintf(stderr, "\t-a  ntlm | nt | lm\n"
+#ifdef ENABLE_KERBEROS
+        		fprintf(stderr, "\t-a  ntlm | nt | lm | gss\n"
+#else
+                fprintf(stderr, "\t-a  ntlm | nt | lm\n"
+#endif
+		fprintf(stderr, "\t-a  ntlm | nt | lm | gss\n"
 				"\t    Authentication type - combined NTLM, just LM, or just NT. Default NTLM.\n"
+#ifdef ENABLE_KERBEROS
+				"\t    GSS activates kerberos auth: you need a cached credential.\n"
+#endif
 				"\t    It is the most versatile setting and likely to work for you.\n");
 		fprintf(stderr, "\t-B  Enable NTLM-to-basic authentication.\n");
 		fprintf(stderr, "\t-c  <config_file>\n"
@@ -1175,6 +1187,14 @@ int main(int argc, char **argv) {
 			g_creds->hashnt = 2;
 			g_creds->hashlm = 0;
 			g_creds->hashntlm2 = 0;
+#ifdef ENABLE_KERBEROS			
+		} else if (!strcasecmp("gss", cauth)) {
+			g_creds->haskrb = KRB_FORCE_USE_KRB;
+			g_creds->hashnt = 0;
+			g_creds->hashlm = 0;
+			g_creds->hashntlm2 = 0;
+			syslog(LOG_INFO, "Forcing GSS auth.\n");
+#endif				
 		} else {
 			syslog(LOG_ERR, "Unknown NTLM auth combination.\n");
 			myexit(1);
@@ -1265,6 +1285,12 @@ int main(int argc, char **argv) {
 		memset(cpassword, 0, strlen(cpassword));
 	}
 
+#ifdef ENABLE_KERBEROS
+	g_creds->haskrb |= check_credential();
+	if(g_creds->haskrb & KRB_CREDENTIAL_AVAILABLE)
+		syslog(LOG_INFO, "Using cached credential for GSS auth.\n");
+#endif
+
 	auth_strcpy(g_creds, user, cuser);
 	auth_strcpy(g_creds, domain, cdomain);
 	auth_strcpy(g_creds, workstation, cworkstation);
@@ -1312,8 +1338,11 @@ int main(int argc, char **argv) {
 	/*
 	 * If we're going to need a password, check we really have it.
 	 */
-	if (!ntlmbasic && (
-			(g_creds->hashnt && !g_creds->passnt)
+	if (!ntlmbasic &&
+#ifdef ENABLE_KERBEROS
+			!g_creds->haskrb &&
+#endif
+			((g_creds->hashnt && !g_creds->passnt)
 		     || (g_creds->hashlm && !g_creds->passlm)
 		     || (g_creds->hashntlm2 && !g_creds->passntlm2))) {
 		syslog(LOG_ERR, "Parent proxy account password (or required hashes) missing.\n");

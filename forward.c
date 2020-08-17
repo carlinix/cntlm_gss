@@ -38,6 +38,10 @@
 #include "scanner.h"
 #include "pages.h"
 
+#ifdef ENABLE_KERBEROS
+#include "kerberos.h"
+#endif
+
 int parent_curr = 0;
 pthread_mutex_t parent_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -49,6 +53,11 @@ pthread_mutex_t parent_mtx = PTHREAD_MUTEX_INITIALIZER;
  *
  * Writes required credentials into passed auth_s structure
  */
+
+#ifdef ENABLE_KERBEROS
+proxy_t *curr_proxy;
+#endif
+
 int proxy_connect(struct auth_s *credentials) {
 	proxy_t *aux;
 	int i, prev;
@@ -91,6 +100,12 @@ int proxy_connect(struct auth_s *credentials) {
 			aux = (proxy_t *)plist_get(parent_list, ++parent_curr);
 			pthread_mutex_unlock(&parent_mtx);
 			syslog(LOG_ERR, "Proxy connect failed, will try %s:%d\n", aux->hostname, aux->port);
+
+#ifdef ENABLE_KERBEROS
+		} else {
+			//kerberos needs the hostname of the parent proxy for generate the token, so we keep it
+			curr_proxy = aux;
+#endif
 		}
 	} while (i <= 0 && ++loop < parent_count);
 
@@ -141,13 +156,28 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 	int rc = 0;
 
 	buf = new(BUFSIZE);
-
-	strcpy(buf, "NTLM ");
-	len = ntlm_request(&tmp, credentials);
-	if (len) {
-		to_base64(MEM(buf, uint8_t, 5), MEM(tmp, uint8_t, 0), len, BUFSIZE-5);
-		free(tmp);
+	
+#ifdef ENABLE_KERBEROS
+	if(g_creds->haskrb && acquire_kerberos_token(curr_proxy, credentials, buf)) {
+		//pre auth, we try to authenticate directly with kerberos, without to ask if auth is needed
+		//we assume that if kdc releases a ticket for the proxy, then the proxy is configured for kerberos auth
+		//drawback is that later in the code cntlm logs that no auth is required because we have already authenticated
+		if (debug)
+			printf("Using Negotiation ...\n");
 	}
+	else {
+#endif
+
+		strcpy(buf, "NTLM ");
+		len = ntlm_request(&tmp, credentials);
+		if (len) {
+			to_base64(MEM(buf, uint8_t, 5), MEM(tmp, uint8_t, 0), len, BUFSIZE-5);
+			free(tmp);
+		}
+
+#ifdef ENABLE_KERBEROS		
+	}
+#endif
 
 	auth = dup_rr_data(request);
 	auth->headers = hlist_mod(auth->headers, "Proxy-Authorization", buf, 1);
@@ -226,30 +256,44 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 			goto bailout;
 		}
 		tmp = hlist_get(auth->headers, "Proxy-Authenticate");
+
 		if (tmp) {
-			challenge = new(strlen(tmp) + 5 + 1);
-			len = from_base64(challenge, tmp + 5);
-			if (len > NTLM_CHALLENGE_MIN) {
-				len = ntlm_response(&tmp, challenge, len, credentials);
-				if (len > 0) {
-					strcpy(buf, "NTLM ");
-					to_base64(MEM(buf, uint8_t, 5), MEM(tmp, uint8_t, 0), len, BUFSIZE-5);
-					request->headers = hlist_mod(request->headers, "Proxy-Authorization", buf, 1);
-					free(tmp);
+#ifdef ENABLE_KERBEROS		
+			if(g_creds->haskrb && strncasecmp(tmp, "NEGOTIATE", 9) == 0 && acquire_kerberos_token(curr_proxy, credentials, buf)) {
+				if (debug)
+					printf("Using Negotiation ...\n");
+
+				request->headers = hlist_mod(request->headers, "Proxy-Authorization", buf, 1);
+				free(tmp);
+			}
+			else {
+#endif			
+				challenge = new(strlen(tmp) + 5 + 1);
+				len = from_base64(challenge, tmp + 5);
+				if (len > NTLM_CHALLENGE_MIN) {
+					len = ntlm_response(&tmp, challenge, len, credentials);
+					if (len > 0) {
+						strcpy(buf, "NTLM ");
+						to_base64(MEM(buf, uint8_t, 5), MEM(tmp, uint8_t, 0), len, BUFSIZE-5);
+						request->headers = hlist_mod(request->headers, "Proxy-Authorization", buf, 1);
+						free(tmp);
+					} else {
+						syslog(LOG_ERR, "No target info block. Cannot do NTLMv2!\n");
+						free(challenge);
+						goto bailout;
+					}
 				} else {
-					syslog(LOG_ERR, "No target info block. Cannot do NTLMv2!\n");
+					syslog(LOG_ERR, "Proxy returning invalid challenge!\n");
 					free(challenge);
 					goto bailout;
 				}
-			} else {
-				syslog(LOG_ERR, "Proxy returning invalid challenge!\n");
-				free(challenge);
-				goto bailout;
-			}
 
-			free(challenge);
+				free(challenge);
+#ifdef ENABLE_KERBEROS				
+			}
+#endif			
 		} else {
-			syslog(LOG_WARNING, "No Proxy-Authenticate, NTLM not supported?\n");
+			syslog(LOG_WARNING, "No Proxy-Authenticate, NTLM/Negotiate not supported?\n");
 		}
 	} else if (pretend407) {
 		if (debug)
@@ -446,7 +490,9 @@ beginning:
 					&& strcasecmp(hostname, data[0]->hostname)) {
 				if (debug)
 					printf("\n******* F RETURN: %s *******\n", data[0]->url);
-				if (authok)
+				if (authok && data[0]->http_version >= 11
+						&& (hlist_subcmp(data[0]->headers, "Proxy-Connection", "keep-alive")
+							|| hlist_subcmp(data[0]->headers, "Connection", "keep-alive")))
 					proxy_alive = 1;
 
 				rc = dup_rr_data(data[0]);
@@ -465,7 +511,7 @@ shortcut:
 			/*
 			 * Modify request headers.
 			 *
-			 * Try to request keep-alive for every connection. We keep them in a pool
+			 * Try to request keep-alive for every client supporting HTTP/1.1+. We keep them in a pool
 			 * for future reuse.
 			 */
 			if (loop == 0 && data[0]->req) {
@@ -499,13 +545,14 @@ shortcut:
 				}
 
 				/*
-				 * Also remove runaway P-A from the client (e.g. Basic from N-t-B), which might 
-				 * cause some ISAs to deny us, even if the connection is already auth'd.
+				 * Force proxy keep-alive if the client can handle it (HTTP >= 1.1)
 				 */
-				data[0]->headers = hlist_mod(data[0]->headers, "Proxy-Connection", "keep-alive", 1);
+				if (data[0]->http_version >= 11)
+					data[0]->headers = hlist_mod(data[0]->headers, "Proxy-Connection", "keep-alive", 1);
 
 				/*
-				 * Remove all Proxy-Authorization headers from client
+				 * Also remove runaway P-A from the client (e.g. Basic from N-t-B), which might 
+				 * cause some ISAs to deny us, even if the connection is already auth'd.
 				 */
 				while (hlist_get(data[loop]->headers, "Proxy-Authorization")) {
 					data[loop]->headers = hlist_del(data[loop]->headers, "Proxy-Authorization");
@@ -672,8 +719,14 @@ shortcut:
 			 * This way, we also tell our caller that proxy keep-alive is impossible.
 			 */
 			if (loop == 1) {
-				proxy_alive = hlist_subcmp(data[loop]->headers, "Proxy-Connection", "keep-alive");
-				if (!proxy_alive) {
+				proxy_alive = hlist_subcmp(data[1]->headers, "Proxy-Connection", "keep-alive")
+					&& data[0]->http_version >= 11;
+				if (proxy_alive) {
+					data[1]->headers = hlist_mod(data[1]->headers, "Proxy-Connection", "keep-alive", 1);
+					data[1]->headers = hlist_mod(data[1]->headers, "Connection", "keep-alive", 1);
+				} else {
+					data[1]->headers = hlist_mod(data[1]->headers, "Proxy-Connection", "close", 1);
+					data[1]->headers = hlist_mod(data[1]->headers, "Connection", "close", 1);
 					if (debug)
 						printf("PROXY CLOSING CONNECTION\n");
 					rc = (void *)-1;
